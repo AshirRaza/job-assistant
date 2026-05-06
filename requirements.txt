@@ -1,0 +1,15 @@
+anthropic
+fastapi
+uvicorn
+pdfplumber
+langchain
+langchain-community
+chromadb
+sentence-transformers
+spacy
+transformers
+torch
+pydantic
+python-dotenv
+ragas
+python-multipart
