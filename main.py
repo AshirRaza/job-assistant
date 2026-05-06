@@ -4,19 +4,19 @@ from fastapi import FastAPI, File, Form, UploadFile
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 
-from models.schemas import AnalysisRequest, AnalysisResponse, ErrorResponse, SkillMatch
+from models.schemas import AnalysisRequest, AnalysisResponse, ErrorResponse
 from pipeline.ingestion import (
     IngestionError,
-    chunk_document_pages,
     extract_pdf_pages_from_bytes,
-    resolve_document_text,
 )
+from pipeline.rag import RAGPipelineError, get_rag_pipeline
 from utils.config import Settings, get_settings
 from utils.helpers import setup_logger
 
 app = FastAPI(title="CV Analyzer API", version="0.1.0")
 logger = setup_logger()
 settings: Settings = get_settings()
+_rag_pipeline = None
 
 
 def _error_response(
@@ -51,6 +51,29 @@ def _has_uploaded_file(file: UploadFile | None) -> bool:
     return file is not None and bool(file.filename)
 
 
+def _pages_to_text(pages: list[dict[str, int | str]]) -> str:
+    return "\n\n".join(str(page["text"]) for page in pages)
+
+
+def _get_rag_pipeline():
+    global _rag_pipeline
+    try:
+        if _rag_pipeline is None:
+            _rag_pipeline = get_rag_pipeline()
+        return _rag_pipeline
+    except Exception as exc:  # pragma: no cover
+        raise RAGPipelineError(f"Failed to initialize RAG pipeline: {exc}") from exc
+
+
+async def _resolve_input_text(text: str | None, file: UploadFile | None) -> str | None:
+    if _has_uploaded_file(file):
+        pages = extract_pdf_pages_from_bytes(await file.read())
+        return _pages_to_text(pages)
+    if text is not None:
+        return text
+    return None
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     logger.debug("Health check received.")
@@ -70,11 +93,12 @@ async def analyze(
     top_k: int = Form(default=8),
 ) -> AnalysisResponse | JSONResponse:
     try:
+        resolved_cv_text = await _resolve_input_text(cv_text, cv_file)
+        resolved_jd_text = await _resolve_input_text(jd_text, jd_file)
+
         request_model = _build_request_model(
-            cv_text=cv_text,
-            jd_text=jd_text,
-            cv_file_path="uploaded" if _has_uploaded_file(cv_file) else None,
-            jd_file_path="uploaded" if _has_uploaded_file(jd_file) else None,
+            cv_text=resolved_cv_text,
+            jd_text=resolved_jd_text,
             top_k=top_k,
         )
     except ValidationError as exc:
@@ -86,18 +110,7 @@ async def analyze(
         )
 
     try:
-        if cv_file is not None:
-            cv_pages = extract_pdf_pages_from_bytes(await cv_file.read())
-        else:
-            cv_pages = resolve_document_text(source="cv", text=request_model.cv_text)
-
-        if jd_file is not None:
-            jd_pages = extract_pdf_pages_from_bytes(await jd_file.read())
-        else:
-            jd_pages = resolve_document_text(source="jd", text=request_model.jd_text)
-
-        cv_chunks = chunk_document_pages(cv_pages, source="cv")
-        jd_chunks = chunk_document_pages(jd_pages, source="jd")
+        return _get_rag_pipeline().run(request_model)
     except IngestionError as exc:
         return _error_response(
             status_code=400,
@@ -113,23 +126,18 @@ async def analyze(
             details={"reason": str(exc)},
         )
 
-    # Placeholder analysis until retrieval and LLM layers are connected.
-    return AnalysisResponse(
-        match_score=0,
-        score_reasoning=(
-            f"Ingestion complete. CV chunks: {len(cv_chunks)}, JD chunks: {len(jd_chunks)}. "
-            "Full scoring is pending embedding/retrieval/LLM integration."
-        ),
-        skill_match=SkillMatch(),
-        cv_suggestions=[],
-        keyword_gaps=[],
-        overall_verdict="Ingestion successful; analysis pipeline not fully connected yet.",
-        model_used=settings.claude_model,
-    )
+    except RAGPipelineError as exc:
+        return _error_response(
+            status_code=400,
+            error_type="pipeline_error",
+            message="RAG pipeline failed.",
+            details={"reason": str(exc)},
+        )
 
 
 @app.post(
     "/score",
+    response_model=None,
     responses={200: {"content": {"application/json": {}}}, 400: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
 )
 async def score(
@@ -139,11 +147,12 @@ async def score(
     jd_file: UploadFile | None = File(default=None),
 ) -> dict[str, int] | JSONResponse:
     try:
+        resolved_cv_text = await _resolve_input_text(cv_text, cv_file)
+        resolved_jd_text = await _resolve_input_text(jd_text, jd_file)
+
         request_model = _build_request_model(
-            cv_text=cv_text,
-            jd_text=jd_text,
-            cv_file_path="uploaded" if _has_uploaded_file(cv_file) else None,
-            jd_file_path="uploaded" if _has_uploaded_file(jd_file) else None,
+            cv_text=resolved_cv_text,
+            jd_text=resolved_jd_text,
             top_k=1,
         )
     except ValidationError as exc:
@@ -155,18 +164,8 @@ async def score(
         )
 
     try:
-        if cv_file is not None:
-            cv_pages = extract_pdf_pages_from_bytes(await cv_file.read())
-        else:
-            cv_pages = resolve_document_text(source="cv", text=request_model.cv_text)
-
-        if jd_file is not None:
-            jd_pages = extract_pdf_pages_from_bytes(await jd_file.read())
-        else:
-            jd_pages = resolve_document_text(source="jd", text=request_model.jd_text)
-
-        cv_chunks = chunk_document_pages(cv_pages, source="cv")
-        jd_chunks = chunk_document_pages(jd_pages, source="jd")
+        analysis = _get_rag_pipeline().run(request_model)
+        return {"match_score": analysis.match_score}
     except IngestionError as exc:
         return _error_response(
             status_code=400,
@@ -182,6 +181,10 @@ async def score(
             details={"reason": str(exc)},
         )
 
-    # Temporary heuristic score until ranking/scoring is implemented.
-    heuristic_score = min(100, max(0, int((len(cv_chunks) / max(len(jd_chunks), 1)) * 20)))
-    return {"match_score": heuristic_score}
+    except RAGPipelineError as exc:
+        return _error_response(
+            status_code=400,
+            error_type="pipeline_error",
+            message="RAG pipeline failed.",
+            details={"reason": str(exc)},
+        )

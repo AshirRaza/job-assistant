@@ -64,7 +64,11 @@ class CVVectorStore:
         documents = [chunk.text for chunk in chunks]
         embeddings = self._embedding_service.embed_texts(documents)
         ids = [self._build_chunk_id(doc_id, chunk, idx) for idx, chunk in enumerate(chunks)]
-        metadatas = [self._sanitize_metadata(chunk.metadata) for chunk in chunks]
+        metadatas = []
+        for chunk in chunks:
+            metadata = self._sanitize_metadata(chunk.metadata)
+            metadata["doc_id"] = doc_id
+            metadatas.append(metadata)
 
         self._collection.upsert(
             ids=ids,
@@ -75,13 +79,20 @@ class CVVectorStore:
         logger.info("Upserted %d CV chunks into collection.", len(chunks))
         return len(chunks)
 
-    def query_similar_chunks(self, query_text: str, top_k: int = 8) -> list[RetrievedChunk]:
+    def query_similar_chunks(
+        self, query_text: str, top_k: int = 8, doc_id: str | None = None
+    ) -> list[RetrievedChunk]:
         """Query CV chunks for one JD text query."""
         query_embedding = self._embedding_service.embed_text(query_text)
+        query_kwargs: dict[str, Any] = {}
+        if doc_id:
+            query_kwargs["where"] = {"doc_id": doc_id}
+
         raw = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
             include=["documents", "metadatas", "distances"],
+            **query_kwargs,
         )
         return self._parse_query_results(raw)
 
@@ -90,6 +101,7 @@ class CVVectorStore:
         jd_chunks: list[DocumentChunk],
         top_k_per_chunk: int = 8,
         final_top_k: int = 20,
+        cv_doc_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Retrieve relevant CV chunks for each JD chunk and deduplicate by best score."""
         if not jd_chunks:
@@ -98,10 +110,15 @@ class CVVectorStore:
         query_texts = [chunk.text for chunk in jd_chunks]
         query_embeddings = self._embedding_service.embed_texts(query_texts)
 
+        query_kwargs: dict[str, Any] = {}
+        if cv_doc_id:
+            query_kwargs["where"] = {"doc_id": cv_doc_id}
+
         raw = self._collection.query(
             query_embeddings=query_embeddings,
             n_results=top_k_per_chunk,
             include=["documents", "metadatas", "distances"],
+            **query_kwargs,
         )
         candidates = self._parse_query_results(raw, flatten_all=True)
 
