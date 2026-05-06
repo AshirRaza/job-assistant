@@ -30,7 +30,7 @@ class CrossEncoderReranker:
 
     def __init__(self) -> None:
         settings = get_settings()
-        self.enabled = settings.use_reranker
+        self.enabled = settings.use_reranker and not settings.offline_mode
         self.model_name = settings.reranker_model
         self._model: CrossEncoder | None = None
 
@@ -38,7 +38,7 @@ class CrossEncoderReranker:
             self._model = CrossEncoder(self.model_name)
             logger.info("Cross-encoder re-ranker loaded: %s", self.model_name)
         else:
-            logger.info("Cross-encoder re-ranker disabled via USE_RERANKER.")
+            logger.info("Cross-encoder re-ranker disabled (USE_RERANKER=false or OFFLINE_MODE=true).")
 
     def rerank(
         self, *, query_text: str, chunks: list[RetrievedChunk], top_k: int | None = None

@@ -24,6 +24,7 @@ class Settings:
     spacy_model: str
     chroma_persist_dir: Path
     use_reranker: bool
+    offline_mode: bool
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -45,4 +46,5 @@ def get_settings() -> Settings:
         spacy_model=os.getenv("SPACY_MODEL", "en_core_web_sm"),
         chroma_persist_dir=Path(os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")),
         use_reranker=_parse_bool(os.getenv("USE_RERANKER"), default=True),
+        offline_mode=_parse_bool(os.getenv("OFFLINE_MODE"), default=False),
     )

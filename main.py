@@ -101,6 +101,13 @@ async def analyze(
             jd_text=resolved_jd_text,
             top_k=top_k,
         )
+    except IngestionError as exc:
+        return _error_response(
+            status_code=400,
+            error_type="ingestion_error",
+            message="Document ingestion failed.",
+            details={"reason": str(exc)},
+        )
     except ValidationError as exc:
         return _error_response(
             status_code=422,
@@ -154,6 +161,13 @@ async def score(
             cv_text=resolved_cv_text,
             jd_text=resolved_jd_text,
             top_k=1,
+        )
+    except IngestionError as exc:
+        return _error_response(
+            status_code=400,
+            error_type="ingestion_error",
+            message="Document ingestion failed.",
+            details={"reason": str(exc)},
         )
     except ValidationError as exc:
         return _error_response(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from anthropic import Anthropic
 from pydantic import ValidationError
 
-from models.schemas import AnalysisResponse
+from models.schemas import AnalysisResponse, CVSuggestion, SkillMatch
 from utils.config import get_settings
 from utils.helpers import safe_parse_json, setup_logger
 
@@ -21,11 +21,15 @@ class ClaudeAnalyzer:
 
     def __init__(self) -> None:
         settings = get_settings()
-        if not settings.anthropic_api_key:
-            raise LLMError("ANTHROPIC_API_KEY is missing.")
-
+        self.offline_mode = settings.offline_mode
         self.model_name = settings.claude_model
-        self._client = Anthropic(api_key=settings.anthropic_api_key)
+        self._client: Anthropic | None = None
+        if not self.offline_mode:
+            if not settings.anthropic_api_key:
+                raise LLMError("ANTHROPIC_API_KEY is missing.")
+            self._client = Anthropic(api_key=settings.anthropic_api_key)
+        else:
+            logger.info("Offline mode enabled: using heuristic analyzer without Anthropic API.")
 
     @staticmethod
     def _build_prompt(
@@ -99,6 +103,14 @@ class ClaudeAnalyzer:
         cv_skills: list[str],
         jd_skills: list[str],
     ) -> AnalysisResponse:
+        if self.offline_mode:
+            return self._offline_analyze(
+                jd_text=jd_text,
+                cv_context=cv_context,
+                cv_skills=cv_skills,
+                jd_skills=jd_skills,
+            )
+
         prompt = self._build_prompt(
             jd_text=jd_text,
             cv_context=cv_context,
@@ -107,6 +119,7 @@ class ClaudeAnalyzer:
         )
 
         try:
+            assert self._client is not None
             response = self._client.messages.create(
                 model=self.model_name,
                 max_tokens=2000,
@@ -123,6 +136,63 @@ class ClaudeAnalyzer:
             raise LLMError(f"Claude output parsing failed: {exc}") from exc
         except Exception as exc:  # pragma: no cover
             raise LLMError(f"Claude API call failed: {exc}") from exc
+
+    def _offline_analyze(
+        self,
+        *,
+        jd_text: str,
+        cv_context: str,
+        cv_skills: list[str],
+        jd_skills: list[str],
+    ) -> AnalysisResponse:
+        cv_set = set(cv_skills)
+        jd_set = set(jd_skills)
+        matched = sorted(cv_set & jd_set)
+        missing = sorted(jd_set - cv_set)
+        transferable = sorted(item for item in cv_set - jd_set if len(item) > 3)[:5]
+
+        denominator = max(len(jd_set), 1)
+        match_score = int((len(matched) / denominator) * 100)
+        verdict = (
+            "Strong alignment for core requirements."
+            if match_score >= 70
+            else "Moderate fit with several missing requirements."
+            if match_score >= 40
+            else "Low alignment; substantial skill gaps remain."
+        )
+        suggestion_text = (
+            "Add an explicit skills section and include missing JD keywords naturally in project bullets."
+        )
+        if missing:
+            suggestion_text = (
+                "Highlight adjacent experience and add measurable outcomes for: "
+                + ", ".join(missing[:5])
+                + "."
+            )
+
+        return AnalysisResponse(
+            match_score=max(0, min(100, match_score)),
+            score_reasoning=(
+                f"Offline heuristic mode based on skill overlap. "
+                f"Matched {len(matched)} of {len(jd_set)} extracted JD skills."
+            ),
+            skill_match=SkillMatch(
+                matched_skills=matched,
+                missing_skills=missing,
+                transferable_skills=transferable,
+            ),
+            cv_suggestions=[
+                CVSuggestion(
+                    section="Skills/Projects",
+                    current=cv_context[:200] if cv_context else "N/A",
+                    suggested=suggestion_text,
+                    reasoning="Improves keyword alignment and ATS discoverability in offline mode.",
+                )
+            ],
+            keyword_gaps=missing[:10],
+            overall_verdict=verdict,
+            model_used="offline-heuristic-v1",
+        )
 
 
 _claude_analyzer: ClaudeAnalyzer | None = None
