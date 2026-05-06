@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pdfplumber
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from utils.helpers import setup_logger, validate_file_path, validate_text
 

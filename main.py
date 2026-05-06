@@ -47,6 +47,10 @@ def _build_request_model(
     )
 
 
+def _has_uploaded_file(file: UploadFile | None) -> bool:
+    return file is not None and bool(file.filename)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     logger.debug("Health check received.")
@@ -66,7 +70,13 @@ async def analyze(
     top_k: int = Form(default=8),
 ) -> AnalysisResponse | JSONResponse:
     try:
-        request_model = _build_request_model(cv_text=cv_text, jd_text=jd_text, top_k=top_k)
+        request_model = _build_request_model(
+            cv_text=cv_text,
+            jd_text=jd_text,
+            cv_file_path="uploaded" if _has_uploaded_file(cv_file) else None,
+            jd_file_path="uploaded" if _has_uploaded_file(jd_file) else None,
+            top_k=top_k,
+        )
     except ValidationError as exc:
         return _error_response(
             status_code=422,
@@ -129,7 +139,13 @@ async def score(
     jd_file: UploadFile | None = File(default=None),
 ) -> dict[str, int] | JSONResponse:
     try:
-        request_model = _build_request_model(cv_text=cv_text, jd_text=jd_text, top_k=1)
+        request_model = _build_request_model(
+            cv_text=cv_text,
+            jd_text=jd_text,
+            cv_file_path="uploaded" if _has_uploaded_file(cv_file) else None,
+            jd_file_path="uploaded" if _has_uploaded_file(jd_file) else None,
+            top_k=1,
+        )
     except ValidationError as exc:
         return _error_response(
             status_code=422,
