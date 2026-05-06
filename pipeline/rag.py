@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 from models.schemas import AnalysisRequest, AnalysisResponse
 from pipeline.ingestion import chunk_document_pages, resolve_document_text
@@ -10,6 +11,7 @@ from pipeline.llm import LLMError, get_claude_analyzer
 from pipeline.ner import get_skill_extractor
 from pipeline.reranker import get_reranker
 from pipeline.vector_store import RetrievedChunk, get_vector_store
+from utils.config import get_settings
 from utils.helpers import setup_logger, timed_block
 
 logger = setup_logger(__name__)
@@ -23,10 +25,14 @@ class RAGPipeline:
     """End-to-end orchestration for CV vs JD analysis."""
 
     def __init__(self) -> None:
+        settings = get_settings()
         self._vector_store = get_vector_store()
         self._reranker = get_reranker()
         self._skill_extractor = get_skill_extractor()
         self._llm = get_claude_analyzer()
+        self._max_context_tokens = settings.max_context_tokens
+        self._summarize_overflow = settings.summarize_overflow
+        self._overflow_summary_tokens = settings.overflow_summary_tokens
 
     @staticmethod
     def _build_doc_id(cv_text: str) -> str:
@@ -38,20 +44,64 @@ class RAGPipeline:
         return "\n\n".join(str(page["text"]) for page in pages)
 
     @staticmethod
-    def _build_context(chunks: list[RetrievedChunk], max_chars: int = 12000) -> str:
+    def _estimate_tokens(text: str) -> int:
+        # Lightweight token estimate for budgeting without extra tokenizer deps.
+        return len(re.findall(r"\w+|[^\w\s]", text))
+
+    def _truncate_to_tokens(self, text: str, token_limit: int) -> str:
+        tokens = re.findall(r"\w+|[^\w\s]", text)
+        if len(tokens) <= token_limit:
+            return text
+        clipped = " ".join(tokens[:token_limit]).strip()
+        return clipped
+
+    def _summarize_overflow_chunks(
+        self, overflow_chunks: list[RetrievedChunk], token_budget: int
+    ) -> str:
+        if not overflow_chunks or token_budget <= 0:
+            return ""
+
+        snippets: list[str] = []
+        for chunk in overflow_chunks[:6]:
+            text = chunk.text.strip()
+            if not text:
+                continue
+            # Extractive first-sentence style summary.
+            sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+            snippets.append(sentence)
+
+        summary = "Additional relevant CV context (summarized): " + " ".join(snippets)
+        return self._truncate_to_tokens(summary, token_budget)
+
+    def _build_context(self, chunks: list[RetrievedChunk], max_tokens: int) -> str:
         sections: list[str] = []
-        total_chars = 0
-        for chunk in chunks:
+        consumed = 0
+        overflow_index = len(chunks)
+
+        for index, chunk in enumerate(chunks):
             snippet = chunk.text.strip()
             if not snippet:
                 continue
 
             page_number = chunk.metadata.get("page_number", "n/a")
             section = f"[Page {page_number}] {snippet}"
-            if total_chars + len(section) > max_chars:
+            section_tokens = self._estimate_tokens(section)
+            if consumed + section_tokens > max_tokens:
+                overflow_index = index
                 break
             sections.append(section)
-            total_chars += len(section)
+            consumed += section_tokens
+
+        if self._summarize_overflow and overflow_index < len(chunks):
+            remaining = chunks[overflow_index:]
+            budget = max_tokens - consumed
+            if budget > 24:
+                summary = self._summarize_overflow_chunks(
+                    remaining, min(self._overflow_summary_tokens, budget)
+                )
+                if summary:
+                    sections.append(summary)
+
         return "\n\n".join(sections)
 
     def run(self, request: AnalysisRequest) -> AnalysisResponse:
@@ -103,7 +153,7 @@ class RAGPipeline:
                 ]
 
             with timed_block("llm_stage", logger):
-                context = self._build_context(selected)
+                context = self._build_context(selected, max_tokens=self._max_context_tokens)
                 response = self._llm.analyze(
                     jd_text=jd_full_text,
                     cv_context=context,

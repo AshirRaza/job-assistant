@@ -42,6 +42,33 @@ KNOWN_SKILLS = {
     "rest",
 }
 
+SKILL_ALIASES = {
+    "js": "javascript",
+    "ts": "typescript",
+    "nodejs": "node.js",
+    "node js": "node.js",
+    "postgres": "postgresql",
+    "postgre": "postgresql",
+    "k8s": "kubernetes",
+    "py": "python",
+    "tf": "terraform",
+    "gcp cloud": "gcp",
+    "amazon web services": "aws",
+}
+
+NOISE_TERMS = {
+    "experience",
+    "team",
+    "project",
+    "development",
+    "engineer",
+    "company",
+    "responsible",
+    "requirement",
+    "knowledge",
+    "ability",
+}
+
 
 @dataclass(frozen=True)
 class NERResult:
@@ -60,20 +87,46 @@ class SkillExtractor:
         self._nlp = spacy.load(settings.spacy_model)
         self._zero_shot = None
 
-    @staticmethod
-    def _normalize_skill(value: str) -> str:
-        value = value.strip()
+    @classmethod
+    def _normalize_skill(cls, value: str) -> str:
+        value = value.strip().lower()
+        value = value.replace("&", " and ")
+        value = re.sub(r"[/_]", " ", value)
         value = re.sub(r"\s+", " ", value)
-        return value.lower()
+        value = value.strip(".:,;()[]{}")
+        value = cls._apply_alias(value)
+        return value
+
+    @staticmethod
+    def _apply_alias(value: str) -> str:
+        return SKILL_ALIASES.get(value, value)
+
+    @staticmethod
+    def _is_valid_skill_candidate(value: str) -> bool:
+        if not value:
+            return False
+        if value in NOISE_TERMS:
+            return False
+        if value.isdigit():
+            return False
+        if len(value) < 2 or len(value) > 40:
+            return False
+        if not re.search(r"[a-zA-Z]", value):
+            return False
+        return True
 
     def _extract_spacy_entities(self, text: str) -> list[str]:
         doc = self._nlp(text)
-        skill_like_labels = {"ORG", "PRODUCT", "WORK_OF_ART", "LANGUAGE"}
+        skill_like_labels = {"ORG", "PRODUCT", "LANGUAGE"}
         entities = [ent.text.strip() for ent in doc.ents if ent.label_ in skill_like_labels]
 
         # Add noun chunks that are likely to represent tools/skills.
         for chunk in doc.noun_chunks:
             candidate = chunk.text.strip()
+            if chunk.root.pos_ not in {"PROPN", "NOUN"}:
+                continue
+            if re.fullmatch(r"(the|a|an)\s+.+", candidate.lower()):
+                candidate = re.sub(r"^(the|a|an)\s+", "", candidate, flags=re.IGNORECASE)
             if 2 <= len(candidate) <= 40 and re.search(r"[A-Za-z]", candidate):
                 entities.append(candidate)
         return entities
@@ -89,14 +142,16 @@ class SkillExtractor:
     def extract(self, text: str) -> NERResult:
         entities = self._extract_spacy_entities(text)
         combined = entities + self._extract_known_skills(text)
-        normalized = sorted(
-            {
-                self._normalize_skill(item)
-                for item in combined
-                if item and self._normalize_skill(item)
-            }
-        )
-        return NERResult(entities=entities, normalized_skills=normalized, categories=None)
+        normalized_set: set[str] = set()
+        for item in combined:
+            normalized = self._normalize_skill(item)
+            if self._is_valid_skill_candidate(normalized):
+                normalized_set.add(normalized)
+
+        # Keep deterministic order and prioritize known skill lexicon when present.
+        normalized = sorted(normalized_set, key=lambda x: (x not in KNOWN_SKILLS, x))
+        raw_entities = sorted({item.strip() for item in entities if item.strip()})
+        return NERResult(entities=raw_entities, normalized_skills=normalized, categories=None)
 
     def categorize_skills_zero_shot(
         self,

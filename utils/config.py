@@ -25,12 +25,24 @@ class Settings:
     chroma_persist_dir: Path
     use_reranker: bool
     offline_mode: bool
+    max_context_tokens: int
+    summarize_overflow: bool
+    overflow_summary_tokens: int
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_int(value: str | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 @lru_cache(maxsize=1)
@@ -47,4 +59,7 @@ def get_settings() -> Settings:
         chroma_persist_dir=Path(os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")),
         use_reranker=_parse_bool(os.getenv("USE_RERANKER"), default=True),
         offline_mode=_parse_bool(os.getenv("OFFLINE_MODE"), default=False),
+        max_context_tokens=_parse_int(os.getenv("MAX_CONTEXT_TOKENS"), default=2200),
+        summarize_overflow=_parse_bool(os.getenv("SUMMARIZE_OVERFLOW"), default=True),
+        overflow_summary_tokens=_parse_int(os.getenv("OVERFLOW_SUMMARY_TOKENS"), default=320),
     )

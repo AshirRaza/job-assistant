@@ -5,3 +5,7 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Keep only SQLite in Chroma persist directory.
+chroma_db/*
+!chroma_db/*.sqlite3
