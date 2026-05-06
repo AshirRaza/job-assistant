@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,10 @@ class RetrievedChunk:
     text: str
     metadata: dict[str, Any]
     distance: float
+
+
+def _tokenize(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9\+\#\.-]+", text.lower()) if len(token) >= 2}
 
 
 class CVVectorStore:
@@ -102,8 +107,9 @@ class CVVectorStore:
         top_k_per_chunk: int = 8,
         final_top_k: int = 20,
         cv_doc_id: str | None = None,
+        hybrid_query_text: str | None = None,
     ) -> list[RetrievedChunk]:
-        """Retrieve relevant CV chunks for each JD chunk and deduplicate by best score."""
+        """Retrieve relevant CV chunks and re-rank with hybrid lexical+vector scoring."""
         if not jd_chunks:
             return []
 
@@ -121,12 +127,40 @@ class CVVectorStore:
             **query_kwargs,
         )
         candidates = self._parse_query_results(raw, flatten_all=True)
+        if not candidates:
+            return []
+
+        jd_tokens = _tokenize(hybrid_query_text or " ".join(query_texts))
+        section_weights = {
+            "experience": 1.0,
+            "projects": 0.95,
+            "skills": 0.9,
+            "summary": 0.8,
+            "education": 0.7,
+            "general": 0.75,
+        }
+        min_dist = min(chunk.distance for chunk in candidates)
+        max_dist = max(chunk.distance for chunk in candidates)
+        denom = max(max_dist - min_dist, 1e-6)
 
         by_id: dict[str, RetrievedChunk] = {}
         for chunk in candidates:
+            chunk_tokens = _tokenize(chunk.text)
+            token_overlap = len(jd_tokens & chunk_tokens) / max(len(jd_tokens), 1)
+            vector_score = 1.0 - ((chunk.distance - min_dist) / denom)
+            section_type = str(chunk.metadata.get("section_type", "general"))
+            section_weight = section_weights.get(section_type, 0.75)
+            hybrid_score = (0.7 * vector_score) + (0.3 * token_overlap * section_weight)
+            adjusted_distance = 1.0 - hybrid_score
+
             existing = by_id.get(chunk.id)
-            if existing is None or chunk.distance < existing.distance:
-                by_id[chunk.id] = chunk
+            if existing is None or adjusted_distance < existing.distance:
+                by_id[chunk.id] = RetrievedChunk(
+                    id=chunk.id,
+                    text=chunk.text,
+                    metadata=chunk.metadata,
+                    distance=adjusted_distance,
+                )
 
         ranked = sorted(by_id.values(), key=lambda item: item.distance)
         return ranked[:final_top_k]

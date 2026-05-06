@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import pdfplumber
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -23,6 +24,28 @@ class DocumentChunk:
 
     text: str
     metadata: dict[str, str | int | None]
+
+
+SECTION_PATTERNS: dict[str, tuple[str, ...]] = {
+    "skills": ("skills", "technical skills", "core competencies", "tech stack"),
+    "experience": (
+        "experience",
+        "work experience",
+        "employment history",
+        "professional experience",
+    ),
+    "projects": ("projects", "project experience", "portfolio"),
+    "education": ("education", "academic background", "certifications"),
+    "summary": ("summary", "profile", "objective", "about me"),
+}
+
+
+def _detect_section_type(text: str) -> str:
+    snippet = text.lower()
+    for section_type, patterns in SECTION_PATTERNS.items():
+        if any(pattern in snippet for pattern in patterns):
+            return section_type
+    return "general"
 
 
 def extract_pdf_pages_from_path(file_path: str | Path) -> list[dict[str, int | str]]:
@@ -113,11 +136,16 @@ def chunk_document_pages(
         if not page_text:
             continue
 
+        lines = [line.strip() for line in re.split(r"[\r\n]+", page_text) if line.strip()]
+        heading_hint = lines[0][:120] if lines else ""
+        page_section_hint = _detect_section_type(heading_hint) if heading_hint else "general"
         split_chunks = splitter.split_text(page_text)
         for chunk_text in split_chunks:
             clean_chunk = chunk_text.strip()
             if not clean_chunk:
                 continue
+            chunk_section = _detect_section_type(clean_chunk[:220])
+            section_type = chunk_section if chunk_section != "general" else page_section_hint
             all_chunks.append(
                 DocumentChunk(
                     text=clean_chunk,
@@ -125,6 +153,7 @@ def chunk_document_pages(
                         "source": source,
                         "page_number": page_number,
                         "chunk_index": chunk_index,
+                        "section_type": section_type,
                     },
                 )
             )

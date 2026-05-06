@@ -84,7 +84,8 @@ class RAGPipeline:
                 continue
 
             page_number = chunk.metadata.get("page_number", "n/a")
-            section = f"[Page {page_number}] {snippet}"
+            section_type = str(chunk.metadata.get("section_type", "general")).title()
+            section = f"[{section_type} | Page {page_number}] {snippet}"
             section_tokens = self._estimate_tokens(section)
             if consumed + section_tokens > max_tokens:
                 overflow_index = index
@@ -129,11 +130,13 @@ class RAGPipeline:
             with timed_block("retrieval_stage", logger):
                 doc_id = self._build_doc_id(cv_full_text)
                 self._vector_store.upsert_cv_chunks(cv_chunks, doc_id=doc_id)
+                candidate_top_k = max(request.top_k * 3, 20)
                 retrieved = self._vector_store.query_for_jd_chunks(
                     jd_chunks,
-                    top_k_per_chunk=request.top_k,
-                    final_top_k=max(request.top_k, 12),
+                    top_k_per_chunk=candidate_top_k,
+                    final_top_k=candidate_top_k,
                     cv_doc_id=doc_id,
+                    hybrid_query_text=jd_full_text,
                 )
 
             with timed_block("rerank_stage", logger):
