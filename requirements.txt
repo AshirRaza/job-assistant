@@ -13,3 +13,4 @@ pydantic
 python-dotenv
 ragas
 python-multipart
+pytest

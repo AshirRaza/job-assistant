@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, File, Form, UploadFile
+import time
+from uuid import uuid4
+
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 
@@ -28,6 +32,16 @@ def _error_response(
 ) -> JSONResponse:
     payload = ErrorResponse(error=error_type, message=message, details=details)
     return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+
+def _extract_validation_details(exc: Exception) -> dict[str, str]:
+    if hasattr(exc, "errors"):
+        try:
+            details = getattr(exc, "errors")()
+            return {"errors": str(details)}
+        except Exception:
+            pass
+    return {"reason": str(exc)}
 
 
 def _build_request_model(
@@ -74,10 +88,99 @@ async def _resolve_input_text(text: str | None, file: UploadFile | None) -> str 
     return None
 
 
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid4()))
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return _error_response(
+        status_code=422,
+        error_type="validation_error",
+        message="Invalid request payload.",
+        details=_extract_validation_details(exc),
+    )
+
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_exception_handler(
+    _request: Request, exc: ValidationError
+) -> JSONResponse:
+    return _error_response(
+        status_code=422,
+        error_type="validation_error",
+        message="Validation failed.",
+        details=_extract_validation_details(exc),
+    )
+
+
+@app.exception_handler(IngestionError)
+async def ingestion_exception_handler(_request: Request, exc: IngestionError) -> JSONResponse:
+    return _error_response(
+        status_code=400,
+        error_type="ingestion_error",
+        message="Document ingestion failed.",
+        details={"reason": str(exc)},
+    )
+
+
+@app.exception_handler(RAGPipelineError)
+async def pipeline_exception_handler(_request: Request, exc: RAGPipelineError) -> JSONResponse:
+    return _error_response(
+        status_code=400,
+        error_type="pipeline_error",
+        message="RAG pipeline failed.",
+        details={"reason": str(exc)},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception: %s", exc)
+    return _error_response(
+        status_code=500,
+        error_type="pipeline_error",
+        message="Unexpected server error.",
+        details={"reason": str(exc)},
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     logger.debug("Health check received.")
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> dict[str, object]:
+    checks: dict[str, dict[str, object]] = {
+        "settings_loaded": {"ok": True},
+        "anthropic_key_present": {"ok": bool(settings.anthropic_api_key)},
+    }
+    try:
+        _get_rag_pipeline()
+        checks["rag_pipeline_init"] = {"ok": True}
+    except Exception as exc:
+        checks["rag_pipeline_init"] = {"ok": False, "error": str(exc)}
+
+    overall = all(item.get("ok", False) for item in checks.values())
+    return {"status": "ready" if overall else "degraded", "checks": checks}
 
 
 @app.post(
@@ -92,54 +195,14 @@ async def analyze(
     jd_file: UploadFile | None = File(default=None),
     top_k: int = Form(default=8),
 ) -> AnalysisResponse | JSONResponse:
-    try:
-        resolved_cv_text = await _resolve_input_text(cv_text, cv_file)
-        resolved_jd_text = await _resolve_input_text(jd_text, jd_file)
-
-        request_model = _build_request_model(
-            cv_text=resolved_cv_text,
-            jd_text=resolved_jd_text,
-            top_k=top_k,
-        )
-    except IngestionError as exc:
-        return _error_response(
-            status_code=400,
-            error_type="ingestion_error",
-            message="Document ingestion failed.",
-            details={"reason": str(exc)},
-        )
-    except ValidationError as exc:
-        return _error_response(
-            status_code=422,
-            error_type="validation_error",
-            message="Invalid analysis request.",
-            details={"reason": str(exc)},
-        )
-
-    try:
-        return _get_rag_pipeline().run(request_model)
-    except IngestionError as exc:
-        return _error_response(
-            status_code=400,
-            error_type="ingestion_error",
-            message="Document ingestion failed.",
-            details={"reason": str(exc)},
-        )
-    except ValueError as exc:
-        return _error_response(
-            status_code=422,
-            error_type="validation_error",
-            message="Invalid input provided.",
-            details={"reason": str(exc)},
-        )
-
-    except RAGPipelineError as exc:
-        return _error_response(
-            status_code=400,
-            error_type="pipeline_error",
-            message="RAG pipeline failed.",
-            details={"reason": str(exc)},
-        )
+    resolved_cv_text = await _resolve_input_text(cv_text, cv_file)
+    resolved_jd_text = await _resolve_input_text(jd_text, jd_file)
+    request_model = _build_request_model(
+        cv_text=resolved_cv_text,
+        jd_text=resolved_jd_text,
+        top_k=top_k,
+    )
+    return _get_rag_pipeline().run(request_model)
 
 
 @app.post(
@@ -153,52 +216,12 @@ async def score(
     cv_file: UploadFile | None = File(default=None),
     jd_file: UploadFile | None = File(default=None),
 ) -> dict[str, int] | JSONResponse:
-    try:
-        resolved_cv_text = await _resolve_input_text(cv_text, cv_file)
-        resolved_jd_text = await _resolve_input_text(jd_text, jd_file)
-
-        request_model = _build_request_model(
-            cv_text=resolved_cv_text,
-            jd_text=resolved_jd_text,
-            top_k=1,
-        )
-    except IngestionError as exc:
-        return _error_response(
-            status_code=400,
-            error_type="ingestion_error",
-            message="Document ingestion failed.",
-            details={"reason": str(exc)},
-        )
-    except ValidationError as exc:
-        return _error_response(
-            status_code=422,
-            error_type="validation_error",
-            message="Invalid score request.",
-            details={"reason": str(exc)},
-        )
-
-    try:
-        analysis = _get_rag_pipeline().run(request_model)
-        return {"match_score": analysis.match_score}
-    except IngestionError as exc:
-        return _error_response(
-            status_code=400,
-            error_type="ingestion_error",
-            message="Document ingestion failed.",
-            details={"reason": str(exc)},
-        )
-    except ValueError as exc:
-        return _error_response(
-            status_code=422,
-            error_type="validation_error",
-            message="Invalid input provided.",
-            details={"reason": str(exc)},
-        )
-
-    except RAGPipelineError as exc:
-        return _error_response(
-            status_code=400,
-            error_type="pipeline_error",
-            message="RAG pipeline failed.",
-            details={"reason": str(exc)},
-        )
+    resolved_cv_text = await _resolve_input_text(cv_text, cv_file)
+    resolved_jd_text = await _resolve_input_text(jd_text, jd_file)
+    request_model = _build_request_model(
+        cv_text=resolved_cv_text,
+        jd_text=resolved_jd_text,
+        top_k=1,
+    )
+    analysis = _get_rag_pipeline().run(request_model)
+    return {"match_score": analysis.match_score}

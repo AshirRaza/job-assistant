@@ -1,0 +1,16 @@
+[
+  {
+    "cv_text": "Backend engineer skilled in Python, FastAPI, Docker, AWS, and SQL.",
+    "jd_text": "Looking for Python FastAPI AWS engineer with Kubernetes experience.",
+    "expected_score": 75,
+    "expected_missing_skills": ["kubernetes"],
+    "expected_matched_skills": ["python", "fastapi", "aws"]
+  },
+  {
+    "cv_text": "Data engineer with Spark, Airflow, GCP, Python, and Terraform.",
+    "jd_text": "Need data platform engineer with Python, GCP, Terraform, and Kafka.",
+    "expected_score": 70,
+    "expected_missing_skills": ["kafka"],
+    "expected_matched_skills": ["python", "gcp", "terraform"]
+  }
+]
